@@ -1,1 +1,102 @@
 
+%主程序，修改部分参数后可直接运行%
+clear;clc;
+%%参数修改部分，19-24行根据文件的命名情况也需要修改
+yea=2013;%降尺度处理的年份（批处理）
+lats=35.75;late=44.25;%纬度范围
+lons=-9.75;lone=3.75;%经度范围
+SM_path1='..\input_data\ESA_CCI_SM\';%被动微波土壤水分数据的路径，此处相对路径（相对于本代码所在的文件夹）
+lst_path1='..\input_data\MOD11A1\';%地表温度数据的路径，此处相对路径（相对于本代码所在的文件夹）
+ndvi_path1='..\input_data\MOD13A2\';%归一化植被指数数据的路径，此处相对路径（相对于本代码所在的文件夹）
+filledlst_path1='..\output_data\filled_lst\';%地表温度的路径，此处相对路径（相对于本代码所在的文件夹）
+filledR_path='..\output_data\filled_lst_R_RMSE';
+downscaled_sm_path1='..\output_data\downscaled_sm\';%被动微波土壤水分填充后的数据报保存路径，此处相对路径（相对于本代码所在的文件夹）
+downscaled_gwr_sm_path1='..\output_data\downscaled_gwr_sm\';
+if exist(filledR_path,'dir')==0;mkdir(filledR_path);end
+%%
+bb=4:7;%回归半径
+for yeai=1:length(yea)
+    ye=yea(yeai);
+    SM_path=[SM_path1,'ESA_CCI_',num2str(ye)];
+    lst_path=[lst_path1,'MOD11A1_',num2str(ye)];%已质量控制(LST误差小于2k),没有数据的日期全部填充0,lst=dn*0.02
+    ndvi_path=[ndvi_path1,'MOD13A2_',num2str(ye)];%已质量控制,没有数据的日期全部填充nan,ndvi=dn*0.0001
+    filledlst_path=[filledlst_path1,'filled_lst_',num2str(ye)];
+    downscaled_sm_path=[downscaled_sm_path1,'downscaled_sm_',num2str(ye)];
+    downscaled_gwr_sm_path=[downscaled_gwr_sm_path1,'downscaled_gwr_sm_',num2str(ye)];
+    if exist(filledlst_path,'dir')==0;mkdir(filledlst_path);end
+    if exist(downscaled_sm_path,'dir')==0;mkdir(downscaled_sm_path);end
+    if exist(downscaled_gwr_sm_path,'dir')==0;mkdir(downscaled_gwr_sm_path);end
+    %------------------------------------确定数据范围，提取坐标文件----------------------------------
+    disp('extend');
+    fnslst=dir(fullfile(lst_path,'*.tif'));
+    fnssm=dir(fullfile(SM_path,'*.tif'));
+    [rc1,rc2,cc1,cc2,rf1,rf2,cf1,cf2,Rf,infof,indd]=geomatch(lats,lons,late,lone,fullfile(SM_path,fnssm(1).name),fullfile(lst_path,fnslst(1).name));
+    clear fnssm fnslst lats lons late lone;
+    %-----------------------------------ATC LST fill-------------------------------
+    disp([num2str(ye),'ATC']);
+    ATC_LST_fill(ye,lst_path,filledlst_path,filledR_path);
+    %------------------------------------降尺度----------------------------------
+    disp('降尺度');
+    if mod(ye,4) ~= 0;day_num=365;else;day_num=366;end%%判断是否为闰年，则天数为366天
+    n=datenum(ye-1,12,31);
+    for  i=1:day_num
+        [~,m,d,~,~,~]=datevec(n+i);
+        disp([num2str(ye),'_',num2str(m,'%02d'),'_',num2str(d,'%02d')]);
+        %----------------------------------读取文件---------------------------
+        disp('读取文件');
+        sm=imread(fullfile(SM_path,['SM_',num2str(ye),num2str(m,'%02d'),num2str(d,'%02d'),'.tif']));
+        sm=sm(rc1:rc2,cc1:cc2);sm(sm<0)=nan;sm(sm>1)=nan;
+        lst=imread(fullfile(filledlst_path,['MOD11A1_filled_LST_',num2str(ye),'_',num2str(m,'%02d'),'_',num2str(d,'%02d'),'.tif']));
+        lst=lst(rf1:rf2,cf1:cf2);
+        lst(lst==-999)=nan;
+        %         lst(lst<250)=nan;lst(lst>320)=nan;
+        dknd=floor(i/16);
+        if mod(i,16)~=0;ydnd=dknd*16+1;else;ydnd=(dknd-1)*16+1;end
+        [~,mnd,dnd,~,~,~]=datevec(n+ydnd);
+        ndvi=imread(fullfile(ndvi_path,['MOD13A2_NDVI_',num2str(ye),'_',num2str(mnd,'%02d'),'_',num2str(dnd,'%02d'),'.tif']));
+        ndvi=ndvi(rf1:rf2,cf1:cf2);
+        ndvi=double(ndvi);ndvi=ndvi*0.0001;
+        ndvi(ndvi<-0.2)=nan;ndvi(ndvi>1)=nan;
+        [rs,cs]=size(sm);[rm,cm]=size(lst);
+        %-------------------------------归一化、聚合---------------------------
+        disp('归一化、聚合！');
+        [u_s,u_l,u_n,n_l,n_n]=normalize_aggregate(sm,lst,ndvi,rs,cs,indd);
+        clear lst ndvi sm;
+        %-----------------------------------GWR-------------------------------
+        disp('GWR！');
+        [residual,SM_GWR,a,b,window_index]=GWR_GLR(u_s,u_l,u_n,n_l,n_n,bb,indd);
+        SM_GWR(isnan(SM_GWR))=-999;
+        geotiffwrite(fullfile(downscaled_gwr_sm_path,['downscaled_gwr_sm_',num2str(ye),'_',num2str(m,'%02d'),'_',num2str(d,'%02d'),'.tif']),SM_GWR,Rf,'GeoKeyDirectoryTag', infof);
+        clear u_s u_l u_n n_l n_n;
+        SM_GWR(SM_GWR==-999)=nan;
+        %-----------------------------------ATPK----------------------------------
+        disp('ATPKsatrt！');
+        [resi_fine1]=ATPK(residual,rs,cs,rm,cm,indd,window_index,a,b,1);%%downscaled SM for the first ATPK进度消耗hp%
+        resi_fine1(isnan(resi_fine1))=-999;
+        s_fine=SM_GWR+resi_fine1;
+        [daf_c1]=aggregate(resi_fine1,rs,cs,indd);
+        diff1=residual-daf_c1;
+        kw=1;
+        while isempty(find(diff1<-0.01 | diff1>0.01, 1))~=1
+            if kw>4;break;end
+            [resi_fine2]=ATPK(diff1,rs,cs,rm,cm,indd,window_index,a,b,2);
+            %hwc=hwc+hp;
+            %waitbar(hwc/100,hw,['正在计算降尺度结果，请耐心等待！',num2str(99),'%']);
+            [daf_c2]=aggregate(resi_fine2,rs,cs,indd);
+            daf_c2(isnan(daf_c2))=0;
+            diff1=diff1-daf_c2;
+            resi_fine2(isnan(resi_fine2))=0;
+            resi_fine1=resi_fine1+resi_fine2;
+            s_fine=s_fine+resi_fine2;
+            kw=kw+1;
+            disp('ATPK！');
+        end
+        %%--------------------------------数据输出---------------------------------
+        s_fine(s_fine<0)=0;s_fine(s_fine>0.5)=0.5;
+        disp('end！');
+        s_fine(isnan(s_fine))=-999;s_fine(SM_GWR==-999)=-999;
+        geotiffwrite(fullfile(downscaled_sm_path,['Downscaled_ESA_CCI_SM_',num2str(ye),'_',num2str(m,'%02d'),'_',num2str(d,'%02d'),'.tif']),s_fine,Rf,'GeoKeyDirectoryTag', infof);
+        clear s_fine diff1 daf_c1 daf_c2 resi_fine1 residual SM_GWR a b window_index;
+    end
+    clear SM_path lst_path ndvi_path filledlst_path downscaled_sm_path downscaled_gwr_sm_path;
+end
